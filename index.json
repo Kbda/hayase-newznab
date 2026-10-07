@@ -5,7 +5,7 @@
     "name": "Newznab",
     "description": "Finds an NZB on your Newznab indexer matching the selected torrent's release name.",
     "id": "t.newznab",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "type": "nzb",
     "accuracy": "high",
     "icon": "https://nzbfinder.ws/favicon.ico",
@@ -40,7 +40,8 @@
         "description": "Token similarity required for fuzzy matches (0-1)",
         "default": 0.85
       },
-         "debug": { "type": "boolean", "description": "Log queries and results to the developer console", "default": false }
+         "debug": { "type": "boolean", "description": "Log queries and results to the developer console", "default": false },
+         "cache": { "type": "boolean", "description": "Cache indexer searches (saves API calls; misses re-checked after 6h)", "default": true }
     }
   }
 ]

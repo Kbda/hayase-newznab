@@ -91,6 +91,81 @@ export function parseItems (xml) {
   })
 }
 
+// ---------- cache ----------
+// Search results are cached in IndexedDB (falls back to memory) so repeat
+// lookups, including Hayase's add-then-play double call, cost no API hits.
+// All extensions share one origin, so the API key is never written to disk:
+// it's swapped for a placeholder on write and restored on read.
+
+const HIT_TTL = 7 * 24 * 3600e3
+const MISS_TTL = 6 * 3600e3
+const KEY_MARK = '{{APIKEY}}'
+
+export class ResultCache {
+  constructor () {
+    this.mem = new Map()
+    this.inflight = new Map()
+    this.db = (async () => {
+      try {
+        if (typeof indexedDB === 'undefined') return null
+        return await new Promise((resolve, reject) => {
+          const req = indexedDB.open('hayase-newznab', 1)
+          req.onupgradeneeded = () => req.result.createObjectStore('q')
+          req.onsuccess = () => resolve(req.result)
+          req.onerror = () => reject(req.error)
+        })
+      } catch { return null }
+    })()
+  }
+
+  async tx (mode, fn) {
+    const db = await this.db
+    if (!db) return undefined
+    try {
+      return await new Promise((resolve, reject) => {
+        const req = fn(db.transaction('q', mode).objectStore('q'))
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => reject(req.error)
+      })
+    } catch { return undefined }
+  }
+
+  async get (key) {
+    const entry = this.mem.get(key) ?? await this.tx('readonly', s => s.get(key))
+    if (!entry) return undefined
+    if (entry.exp < Date.now()) {
+      this.mem.delete(key)
+      this.tx('readwrite', s => s.delete(key))
+      return undefined
+    }
+    this.mem.set(key, entry)
+    return entry.v
+  }
+
+  async set (key, v, ttl) {
+    const entry = { v, exp: Date.now() + ttl }
+    this.mem.set(key, entry)
+    await this.tx('readwrite', s => s.put(entry, key))
+  }
+
+  // Run fn once per key: cached value, or join an in-flight request.
+  async wrap (key, ttlFor, fn) {
+    const cached = await this.get(key)
+    if (cached !== undefined) return { v: cached, hit: true }
+    if (this.inflight.has(key)) return { v: await this.inflight.get(key), hit: true }
+    const p = (async () => {
+      const v = await fn()
+      await this.set(key, v, ttlFor(v))
+      return v
+    })()
+    this.inflight.set(key, p)
+    try { return { v: await p, hit: false } } finally { this.inflight.delete(key) }
+  }
+}
+
+const redact = (items, key) => items.map(i => ({ ...i, link: i.link?.split(key).join(KEY_MARK) }))
+const restore = (items, key) => items.map(i => ({ ...i, link: i.link?.split(KEY_MARK).join(key) }))
+
 // ---------- extension ----------
 
 export default new class Newznab extends NZBSourceBase {
@@ -103,16 +178,30 @@ export default new class Newznab extends NZBSourceBase {
       cat: (options.categories || '').trim(),
       fuzzy: options.fuzzy === true || options.fuzzy === 'true',
       threshold: Number(options.fuzzyThreshold) || 0.85,
-      debug: options.debug === true || options.debug === 'true'
+      debug: options.debug === true || options.debug === 'true',
+      cache: !(options.cache === false || options.cache === 'false')
     }
   }
 
+  cache = new ResultCache()
+
   async search (q, c, fetchFn, signal) {
-    const params = new URLSearchParams({ t: 'search', q, apikey: c.apiKey, extended: '1', limit: '100' })
-    if (c.cat) params.set('cat', c.cat)
-    const res = await fetchFn(`${c.apiUrl}?${params}`, signal ? { signal } : undefined)
-    if (!res.ok) throw new Error(`Indexer returned HTTP ${res.status}.`)
-    return parseItems(await res.text())
+    const fetchItems = async () => {
+      const params = new URLSearchParams({ t: 'search', q, apikey: c.apiKey, extended: '1', limit: '100' })
+      if (c.cat) params.set('cat', c.cat)
+      const res = await fetchFn(`${c.apiUrl}?${params}`, signal ? { signal } : undefined)
+      if (!res.ok) throw new Error(`Indexer returned HTTP ${res.status}.`)
+      return parseItems(await res.text())
+    }
+    if (!c.cache) return fetchItems()
+
+    const { v, hit } = await this.cache.wrap(
+      `${c.apiUrl}|${c.cat}|${q}`,
+      items => items.length ? HIT_TTL : MISS_TTL,
+      async () => redact(await fetchItems(), c.apiKey)
+    )
+    if (hit) this.log(c, `cache hit q="${q}"`)
+    return restore(v, c.apiKey)
   }
 
   nzbUrl (item, c) {
