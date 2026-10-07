@@ -1,0 +1,46 @@
+[
+  {
+    "manifestVersion": 2,
+    "deprecated": false,
+    "name": "Newznab",
+    "description": "Finds an NZB on your Newznab indexer matching the selected torrent's release name.",
+    "id": "t.newznab",
+    "version": "0.1.0",
+    "type": "nzb",
+    "accuracy": "high",
+    "icon": "https://nzbfinder.ws/favicon.ico",
+    "media": "both",
+    "url": "aHR0cHM6Ly9uemJmaW5kZXIud3M=",
+    "languages": ["ALL"],
+    "update": "https://raw.githubusercontent.com/Kbda/hayase-newznab/main/index.json",
+    "code": "https://raw.githubusercontent.com/Kbda/hayase-newznab/main/newznab.js",
+    "rateLimit": 1,
+    "options": {
+      "apiUrl": {
+        "type": "string",
+        "description": "Newznab API endpoint",
+        "default": "https://nzbfinder.ws/api"
+      },
+      "apiKey": {
+        "type": "string",
+        "description": "Indexer API key",
+        "default": ""
+      },
+      "categories": {
+        "type": "string",
+        "description": "Comma-separated Newznab categories (blank = all; 5070 = TV/Anime)",
+        "default": ""
+      },
+      "fuzzy": {
+        "type": "boolean",
+        "description": "Accept close (non-exact) release-name matches",
+        "default": false
+      },
+      "fuzzyThreshold": {
+        "type": "number",
+        "description": "Token similarity required for fuzzy matches (0-1)",
+        "default": 0.85
+      }
+    }
+  }
+]
