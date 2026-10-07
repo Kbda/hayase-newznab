@@ -6,6 +6,7 @@
 // return an NZB whose release name matches the torrent (exact by default),
 // because Hayase needs the same bytes it would have gotten from the swarm.
 
+const DEADLINE_MS = 8500
 const VIDEO_EXT = /\.(mkv|mp4|avi|m4v|webm|ts|m2ts|wmv|mov)$/i
 
 class NZBSourceBase {
@@ -30,6 +31,24 @@ export function normalize (str = '') {
 export const stripNoise = n => n.replace(/\b[0-9a-f]{8}\b/g, ' ').replace(/\s+/g, ' ').trim()
 
 const tokens = s => new Set(normalize(s).split(' ').filter(Boolean))
+
+// Release group from "[Group] Title ...", "Title ... [Group]" or scene-style "Title...-GROUP".
+export function releaseGroup (raw = '') {
+  const s = raw.split(/[\\/]/).pop().replace(VIDEO_EXT, '').trim()
+  const isGroup = g => g && !/\s/.test(g) && !/^[0-9a-f]{8}$/i.test(g) && !/^\d{3,4}p$/i.test(g)
+  const lead = s.match(/^\[([^\]]+)\]/)?.[1]
+  if (isGroup(lead)) return normalize(lead)
+  const trail = s.match(/\[([^\]]+)\]$/)?.[1]
+  if (isGroup(trail)) return normalize(trail)
+  const scene = s.match(/-([A-Za-z0-9]+)$/)?.[1]
+  if (scene && /[A-Za-z]/.test(scene)) return normalize(scene)
+  return ''
+}
+
+export function seasonEpisode (raw = '') {
+  const m = raw.split(/[\\/]/).pop().match(/\bS(\d{1,2})E(\d{1,4})\b/i)
+  return m ? `s${m[1].padStart(2, '0')}e${m[2].padStart(2, '0')}` : ''
+}
 
 export function similarity (a, b) {
   const A = tokens(a)
@@ -88,10 +107,10 @@ export default new class Newznab extends NZBSourceBase {
     }
   }
 
-  async search (q, c, fetchFn) {
+  async search (q, c, fetchFn, signal) {
     const params = new URLSearchParams({ t: 'search', q, apikey: c.apiKey, extended: '1', limit: '100' })
     if (c.cat) params.set('cat', c.cat)
-    const res = await fetchFn(`${c.apiUrl}?${params}`)
+    const res = await fetchFn(`${c.apiUrl}?${params}`, signal ? { signal } : undefined)
     if (!res.ok) throw new Error(`Indexer returned HTTP ${res.status}.`)
     return parseItems(await res.text())
   }
@@ -118,9 +137,23 @@ export default new class Newznab extends NZBSourceBase {
     ])].filter(q => q.length > 3)
 
     this.log(c, 'targets', wanted)
+    // Hayase drops NZB results that take longer than 10s, without an error.
+    const deadline = Date.now() + DEADLINE_MS
     let best
     for (const q of queries) {
-      const items = await this.search(q, c, fetchFn)
+      const remaining = deadline - Date.now()
+      if (remaining < 500) { this.log(c, 'out of time, stopping'); break }
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), remaining)
+      let items
+      try {
+        items = await this.search(q, c, fetchFn, ctrl.signal)
+      } catch (e) {
+        if (ctrl.signal.aborted) { this.log(c, `q="${q}" timed out`); break }
+        throw e
+      } finally {
+        clearTimeout(timer)
+      }
       this.log(c, `q="${q}" -> ${items.length} results`, items.slice(0, 10).map(i => i.title))
       for (const item of items) {
         const n = normalize(item.title)
@@ -144,17 +177,29 @@ export default new class Newznab extends NZBSourceBase {
 
   async single ({ name, file, titles = [], episode, fetch: qfetch }, options) {
     const c = this.cfg(options)
+    const ts = titles.slice(0, 2).map(normalize)
+    const group = releaseGroup(file) || releaseGroup(name)
+    const sxe = seasonEpisode(file)
     const ep = episode != null ? String(episode).padStart(2, '0') : ''
     // For single-file torrents name === filename; for packs, file is the episode.
     return this.find({
       targets: [file, name],
-      broad: titles.slice(0, 2).map(t => ep && `${normalize(t)} ${ep}`)
+      broad: [
+        ...ts.map(t => group && `${group} ${t}`),
+        ...ts.map(t => sxe && `${t} ${sxe}`),
+        ...ts.map(t => ep && `${t} ${ep}`)
+      ]
     }, c, qfetch || fetch)
   }
 
   async batch ({ name, titles = [], fetch: qfetch }, options) {
     const c = this.cfg(options)
-    return this.find({ targets: [name], broad: titles.slice(0, 2).map(normalize) }, c, qfetch || fetch)
+    const ts = titles.slice(0, 2).map(normalize)
+    const group = releaseGroup(name)
+    return this.find({
+      targets: [name],
+      broad: [...ts.map(t => group && `${group} ${t}`), ...ts]
+    }, c, qfetch || fetch)
   }
 
   // The wiki doesn't say whether Hayase passes options to test(). If it does,

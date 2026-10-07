@@ -5,7 +5,7 @@
     "name": "Newznab",
     "description": "Finds an NZB on your Newznab indexer matching the selected torrent's release name.",
     "id": "t.newznab",
-    "version": "0.2.0",
+    "version": "0.4.0",
     "type": "nzb",
     "accuracy": "high",
     "icon": "https://nzbfinder.ws/favicon.ico",
@@ -14,7 +14,6 @@
     "languages": ["ALL"],
     "update": "https://raw.githubusercontent.com/Kbda/hayase-newznab/main/index.json",
     "code": "https://raw.githubusercontent.com/Kbda/hayase-newznab/main/newznab.js",
-    "rateLimit": 1,
     "options": {
       "apiUrl": {
         "type": "string",
