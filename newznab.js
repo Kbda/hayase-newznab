@@ -26,6 +26,9 @@ export function normalize (str = '') {
     .trim()
 }
 
+// Drop 8-hex CRC32 tags; Usenet reposts frequently omit them.
+export const stripNoise = n => n.replace(/\b[0-9a-f]{8}\b/g, ' ').replace(/\s+/g, ' ').trim()
+
 const tokens = s => new Set(normalize(s).split(' ').filter(Boolean))
 
 export function similarity (a, b) {
@@ -80,7 +83,8 @@ export default new class Newznab extends NZBSourceBase {
       apiKey: options.apiKey,
       cat: (options.categories || '').trim(),
       fuzzy: options.fuzzy === true || options.fuzzy === 'true',
-      threshold: Number(options.fuzzyThreshold) || 0.85
+      threshold: Number(options.fuzzyThreshold) || 0.85,
+      debug: options.debug === true || options.debug === 'true'
     }
   }
 
@@ -98,35 +102,59 @@ export default new class Newznab extends NZBSourceBase {
     return `${c.apiUrl}?${new URLSearchParams({ t: 'get', id: item.guid, apikey: c.apiKey })}`
   }
 
-  // Search queries from most to least specific, stop at first acceptable hit.
-  async find (targets, c, fetchFn) {
-    const wanted = targets.filter(Boolean)
-    const exact = new Set(wanted.map(normalize))
-    const queries = [...new Set(wanted.map(normalize))].filter(q => q.length > 3)
+  log (c, ...args) {
+    if (c.debug) console.log('[newznab]', ...args)
+  }
 
+  // Query ladder from most to least specific. Matching is always against the
+  // torrent's own names, so broad queries only widen the candidate pool.
+  async find ({ targets, broad }, c, fetchFn) {
+    const wanted = targets.filter(Boolean)
+    const exact = new Set(wanted.flatMap(t => [normalize(t), stripNoise(normalize(t))]))
+    const queries = [...new Set([
+      ...wanted.map(normalize),
+      ...wanted.map(t => stripNoise(normalize(t))),
+      ...broad.filter(Boolean)
+    ])].filter(q => q.length > 3)
+
+    this.log(c, 'targets', wanted)
     let best
     for (const q of queries) {
       const items = await this.search(q, c, fetchFn)
+      this.log(c, `q="${q}" -> ${items.length} results`, items.slice(0, 10).map(i => i.title))
       for (const item of items) {
-        if (exact.has(normalize(item.title))) return this.nzbUrl(item, c)
+        const n = normalize(item.title)
+        if (exact.has(n) || exact.has(stripNoise(n))) {
+          this.log(c, 'exact match', item.title)
+          return this.nzbUrl(item, c)
+        }
         if (c.fuzzy) {
-          const score = Math.max(...wanted.map(t => similarity(t, item.title)))
+          const score = Math.max(...wanted.flatMap(t => [
+            similarity(t, item.title),
+            similarity(stripNoise(normalize(t)), stripNoise(n))
+          ]))
           if (score >= c.threshold && (!best || score > best.score)) best = { item, score }
         }
       }
     }
+    if (best) this.log(c, `fuzzy match (${best.score.toFixed(2)})`, best.item.title)
+    else this.log(c, 'no match')
     return best ? this.nzbUrl(best.item, c) : undefined
   }
 
-  async single ({ name, file, fetch: qfetch }, options) {
+  async single ({ name, file, titles = [], episode, fetch: qfetch }, options) {
     const c = this.cfg(options)
+    const ep = episode != null ? String(episode).padStart(2, '0') : ''
     // For single-file torrents name === filename; for packs, file is the episode.
-    return this.find([file, name], c, qfetch || fetch)
+    return this.find({
+      targets: [file, name],
+      broad: titles.slice(0, 2).map(t => ep && `${normalize(t)} ${ep}`)
+    }, c, qfetch || fetch)
   }
 
-  async batch ({ name, fetch: qfetch }, options) {
+  async batch ({ name, titles = [], fetch: qfetch }, options) {
     const c = this.cfg(options)
-    return this.find([name], c, qfetch || fetch)
+    return this.find({ targets: [name], broad: titles.slice(0, 2).map(normalize) }, c, qfetch || fetch)
   }
 
   // The wiki doesn't say whether Hayase passes options to test(). If it does,
